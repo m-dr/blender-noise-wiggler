@@ -1,0 +1,18 @@
+schema_version = "1.0.0"
+
+id = "noise_wiggler"
+version = "0.1.0"
+name = "Noise Wiggler"
+tagline = "Unified procedural noise animation for objects and armatures with spatial wave offsets, hierarchy curves, and seamless looping"
+maintainer = "m-dr"
+type = "add-on"
+blender_version_min = "5.2.0"
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+tags = [
+  "Animation",
+  "Object",
+  "Rigging",
+]
+website = "https://github.com/m-dr/blender-noise-wiggler"
