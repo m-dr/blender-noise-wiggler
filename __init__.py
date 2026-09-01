@@ -8,7 +8,7 @@ from bpy.app.handlers import persistent
 bl_info = {
     "name": "Noise Wiggler",
     "author": "m-dr",
-    "version": (0, 1, 2),
+    "version": (0, 1, 3),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Noise Wiggler",
     "description": "Unified procedural noise animation for objects and armatures with spatial wave offsets, hierarchy curves, and seamless looping",
