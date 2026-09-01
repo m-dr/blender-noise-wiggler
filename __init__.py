@@ -156,9 +156,6 @@ def get_object_fcurves(ob, create_if_missing=False):
 
 
 def ensure_object_fcurve(ob, data_path, index, frame=1):
-    """
-    Ensures an fcurve exists on an object for delta transforms with at least 1 keyframe.
-    """
     if not ob.animation_data:
         ob.animation_data_create()
 
@@ -184,9 +181,6 @@ def ensure_object_fcurve(ob, data_path, index, frame=1):
 
 
 def ensure_bone_fcurve(arm_ob, bone, transform_prop="rotation_euler", index=0, frame=1):
-    """
-    Ensures an fcurve exists for the target pose bone transform with at least 1 keyframe.
-    """
     if not arm_ob.animation_data:
         arm_ob.animation_data_create()
 
@@ -227,7 +221,6 @@ def find_modifier(fcu, name_prefix):
 
 
 def has_object_wiggle(ob):
-    """Checks if an object has active Object Wiggle modifiers or delta keyframes"""
     fcurves = get_object_fcurves(ob)
     for fc in fcurves:
         if fc.data_path in ("delta_rotation_euler", "delta_location"):
@@ -237,7 +230,6 @@ def has_object_wiggle(ob):
 
 
 def has_bone_wiggle(arm_ob):
-    """Checks if an armature has active Bone Wiggle modifiers on pose bones"""
     if not arm_ob or arm_ob.type != 'ARMATURE':
         return False
     fcurves = get_object_fcurves(arm_ob)
@@ -507,7 +499,7 @@ def apply_object_wiggle(ob, props=None):
                         fc.keyframe_points.add(1)
                         fc.keyframe_points[0].co = (1.0, 0.0)
     else:
-        # --- Procedural Noise Modifier Mode ---
+        # Procedural Noise Modifiers
         if props.enable_rotation:
             for idx in range(3):
                 fc = ensure_object_fcurve(ob, "delta_rotation_euler", idx)
@@ -693,7 +685,7 @@ def apply_bone_wiggle(arm_ob, props=None):
                         if m.type == 'CYCLES' and m.name == WIGGLE_BONE_CYCLES_MOD:
                             fc.modifiers.remove(m)
     else:
-        # Procedural Noise Modifiers
+        # Procedural Noise Modifiers (with Restricted Range support)
         for idx, bone in enumerate(target_bones):
             if bone.rotation_mode not in {'XYZ', 'XZY', 'YXZ', 'YZX', 'ZXY', 'ZYX'}:
                 bone.rotation_mode = 'XYZ'
@@ -730,6 +722,14 @@ def apply_bone_wiggle(arm_ob, props=None):
                 mod.depth = 0
                 mod.use_influence = True
                 mod.influence = 1.0
+
+                # Frame range restriction
+                mod.use_restricted_range = props.use_restricted_range
+                if props.use_restricted_range:
+                    mod.frame_start = props.frame_start
+                    mod.frame_end = props.frame_end
+                    mod.blend_in = max(props.blend_in, 0.0)
+                    mod.blend_out = max(props.blend_out, 0.0)
 
     arm_ob.update_tag()
 
@@ -847,6 +847,12 @@ def sync_props_from_modifiers(ob):
                     if mod and mod.type == 'NOISE':
                         bone_props.speed = mod.scale
                         bone_props.strength = mod.strength
+                        if mod.use_restricted_range:
+                            bone_props.use_restricted_range = True
+                            bone_props.frame_start = mod.frame_start
+                            bone_props.frame_end = mod.frame_end
+                            bone_props.blend_in = mod.blend_in
+                            bone_props.blend_out = mod.blend_out
                         break
     finally:
         _is_syncing_props = False
@@ -940,6 +946,12 @@ def on_bone_prop_update(self, context):
                         bp.offset_axis = self.offset_axis
                         bp.spatial_scale = self.spatial_scale
                         bp.guide_object = self.guide_object
+
+                        bp.use_restricted_range = self.use_restricted_range
+                        bp.frame_start = self.frame_start
+                        bp.frame_end = self.frame_end
+                        bp.blend_in = self.blend_in
+                        bp.blend_out = self.blend_out
 
                         bp.enable_loop = self.enable_loop
                         bp.loop_start = self.loop_start
@@ -1147,6 +1159,18 @@ class BoneWiggleProperties(bpy.types.PropertyGroup):
     falloff_amount: bpy.props.FloatProperty(name="Falloff Rate", default=0.35, min=0.0, max=1.0, subtype='FACTOR', update=on_bone_prop_update)
     invert_falloff: bpy.props.BoolProperty(name="Invert (Tips Move More)", default=False, update=on_bone_prop_update)
 
+    # Restrict Frame Range (Consistent with Object Mode)
+    use_restricted_range: bpy.props.BoolProperty(
+        name="Restrict Frame Range",
+        description="Limit procedural bone noise to a specific frame range",
+        default=False,
+        update=on_bone_prop_update,
+    )
+    frame_start: bpy.props.FloatProperty(name="Start", default=1.0, update=on_bone_prop_update)
+    frame_end: bpy.props.FloatProperty(name="End", default=250.0, update=on_bone_prop_update)
+    blend_in: bpy.props.FloatProperty(name="Blend In", default=0.0, min=0.0, update=on_bone_prop_update)
+    blend_out: bpy.props.FloatProperty(name="Blend Out", default=0.0, min=0.0, update=on_bone_prop_update)
+
     # Spatial Offsets
     offset_mode: bpy.props.EnumProperty(
         name="Offset Mode",
@@ -1203,11 +1227,10 @@ class NOISE_WIGGLER_OT_apply(bpy.types.Operator):
         if self.mode == 'OBJECT':
             for ob in sel_obs:
                 if active_ob and ob != active_ob:
-                    # Sync active props
                     ap = active_ob.noise_wiggler_obj_props
                     op = ob.noise_wiggler_obj_props
                     op.rot_speed, op.rot_strength, op.rot_phase, op.rot_influence, op.enable_rotation = ap.rot_speed, ap.rot_strength, ap.rot_phase, ap.rot_influence, ap.enable_rotation
-                    op.loc_speed, op.loc_strength, op.loc_phase, op.loc_influence, op.enable_location = ap.loc_speed, ap.loc_strength, ap.loc_phase, op.loc_influence, ap.enable_location
+                    op.loc_speed, op.loc_strength, op.loc_phase, op.loc_influence, op.enable_location = ap.loc_speed, ap.loc_strength, ap.loc_phase, ap.loc_influence, ap.enable_location
                     op.offset_mode, op.offset_axis, op.spatial_scale, op.guide_object, op.seed, op.use_unique_seed = ap.offset_mode, ap.offset_axis, ap.spatial_scale, ap.guide_object, ap.seed, ap.use_unique_seed
                     op.use_restricted_range, op.frame_start, op.frame_end, op.blend_in, op.blend_out = ap.use_restricted_range, ap.frame_start, ap.frame_end, ap.blend_in, ap.blend_out
                     op.enable_loop, op.loop_start, op.loop_end, op.loop_repeat = ap.enable_loop, ap.loop_start, ap.loop_end, ap.loop_repeat
@@ -1225,6 +1248,7 @@ class NOISE_WIGGLER_OT_apply(bpy.types.Operator):
                     bp.strength, bp.speed, bp.chain_wave, bp.randomness, bp.seed = ap.strength, ap.speed, ap.chain_wave, ap.randomness, ap.seed
                     bp.falloff_enable, bp.falloff_control_type, bp.falloff_amount, bp.invert_falloff = ap.falloff_enable, ap.falloff_control_type, ap.falloff_amount, ap.invert_falloff
                     bp.offset_mode, bp.offset_axis, bp.spatial_scale, bp.guide_object = ap.offset_mode, ap.offset_axis, ap.spatial_scale, ap.guide_object
+                    bp.use_restricted_range, bp.frame_start, bp.frame_end, bp.blend_in, bp.blend_out = ap.use_restricted_range, ap.frame_start, ap.frame_end, ap.blend_in, ap.blend_out
                     bp.enable_loop, bp.loop_start, bp.loop_end, bp.loop_repeat = ap.enable_loop, ap.loop_start, ap.loop_end, ap.loop_repeat
                 apply_bone_wiggle(arm, arm.noise_wiggler_bone_props)
             self.report({'INFO'}, f"Bone Wiggle applied to {len(armatures)} armature(s).")
@@ -1234,7 +1258,7 @@ class NOISE_WIGGLER_OT_apply(bpy.types.Operator):
 
 class NOISE_WIGGLER_OT_clear(bpy.types.Operator):
     bl_idname = "noise_wiggler.clear"
-    bl_label = "Clear Wiggle"
+    bl_label = "Remove Wiggle"
     bl_description = "Remove procedural noise from active/selected targets"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -1256,12 +1280,12 @@ class NOISE_WIGGLER_OT_clear(bpy.types.Operator):
         if self.mode == 'OBJECT':
             for ob in sel_obs:
                 remove_object_wiggle(ob)
-            self.report({'INFO'}, f"Object Wiggle cleared from {len(sel_obs)} object(s).")
+            self.report({'INFO'}, f"Object Wiggle removed from {len(sel_obs)} object(s).")
         else:
             armatures = [o for o in sel_obs if o.type == 'ARMATURE']
             for arm in armatures:
                 remove_bone_wiggle(arm, arm.noise_wiggler_bone_props.bone_filter)
-            self.report({'INFO'}, f"Bone Wiggle cleared from {len(armatures)} armature(s).")
+            self.report({'INFO'}, f"Bone Wiggle removed from {len(armatures)} armature(s).")
 
         return {'FINISHED'}
 
@@ -1385,7 +1409,7 @@ class NOISE_WIGGLER_OT_bake(bpy.types.Operator):
 
 
 # ==============================================================================
-# UI Panel
+# UI Panel (Harmonized Layout & Naming)
 # ==============================================================================
 
 class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
@@ -1423,7 +1447,7 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
             props = target_ob.noise_wiggler_obj_props
             is_active = has_object_wiggle(target_ob)
 
-            # Top Buttons
+            # Top Action Buttons
             main_col = layout.column(align=True)
             row = main_col.row(align=True)
             row.scale_y = 1.3
@@ -1437,7 +1461,7 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
 
             # Status row
             status_row = layout.row(align=True)
-            status_row.label(text="Status: Object Wiggle Active" if is_active else "Status: No Object Wiggle", icon='CHECKMARK' if is_active else 'DOT')
+            status_row.label(text="Status: Wiggle Active" if is_active else "Status: No Wiggle", icon='CHECKMARK' if is_active else 'DOT')
 
             # Rotation Box
             rot_box = layout.box()
@@ -1475,7 +1499,7 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
                 op_match = row2.operator("noise_wiggler.match_scene_range", text="Match Scene", icon='TIME')
                 op_match.mode = 'OBJECT'
 
-            # Frame Restriction
+            # Frame Restriction Box (Only when not looping)
             if not props.enable_loop:
                 range_box = layout.box()
                 range_header = range_box.row(align=True)
@@ -1489,7 +1513,7 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
                     row2.prop(props, "blend_in")
                     row2.prop(props, "blend_out")
 
-            # Spatial Offsets & Seed
+            # Variation & Spatial Offsets Box
             var_box = layout.box()
             var_box.label(text="Variation & Spatial Offsets", icon='SPHERE')
             col = var_box.column(align=True)
@@ -1520,7 +1544,7 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
             is_active = has_bone_wiggle(target_ob)
             arm_count = len([o for o in sel_obs if o.type == 'ARMATURE'])
 
-            # Top Buttons
+            # Top Action Buttons
             main_col = layout.column(align=True)
             row = main_col.row(align=True)
             row.scale_y = 1.3
@@ -1528,20 +1552,20 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
             op = row.operator("noise_wiggler.apply", text=btn_label, icon='PLAY')
             op.mode = 'BONE'
 
-            rem_label = f"Remove ({arm_count} Armatures)" if arm_count > 1 else "Clear Wiggle"
+            rem_label = f"Remove ({arm_count} Armatures)" if arm_count > 1 else "Remove Wiggle"
             op_rem = row.operator("noise_wiggler.clear", text=rem_label, icon='X')
             op_rem.mode = 'BONE'
 
             # Status row
             status_row = layout.row(align=True)
-            status_row.label(text="Status: Bone Wiggle Active" if is_active else "Status: No Bone Wiggle", icon='CHECKMARK' if is_active else 'DOT')
+            status_row.label(text="Status: Wiggle Active" if is_active else "Status: No Wiggle", icon='CHECKMARK' if is_active else 'DOT')
 
             # Presets Header
             box_preset = layout.box()
             box_preset.label(text="Motion Preset", icon='PRESET')
             box_preset.prop(props, "preset", text="")
 
-            # Target Bones
+            # Target Scope
             row_scope = layout.row(align=True)
             row_scope.label(text="Bones:", icon='GROUP_BONE')
             row_scope.prop(props, "bone_filter", text="")
@@ -1576,7 +1600,35 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
                         box_falloff.label(text="Root (0.0) → Tip (1.0):")
                         box_falloff.template_curve_mapping(node, "mapping", type='NONE')
 
-            # Variation & Spatial Offsets
+            # Seamless Looping Box
+            loop_box = layout.box()
+            header_loop = box_loop.row(align=True)
+            header_loop.prop(props, "enable_loop", text="Seamless Looping (No NLA)", icon='FILE_REFRESH')
+            if props.enable_loop:
+                col_loop = box_loop.column(align=True)
+                row_frames = col_loop.row(align=True)
+                row_frames.prop(props, "loop_start")
+                row_frames.prop(props, "loop_end")
+                row_loop_tools = col_loop.row(align=True)
+                row_loop_tools.prop(props, "loop_repeat")
+                op_match = row_loop_tools.operator("noise_wiggler.match_scene_range", text="Match Scene", icon='TIME')
+                op_match.mode = 'BONE'
+
+            # Frame Restriction Box (Only when not looping)
+            if not props.enable_loop:
+                range_box = layout.box()
+                range_header = range_box.row(align=True)
+                range_header.prop(props, "use_restricted_range", text="Restrict Frame Range", icon='PREVIEW_RANGE')
+                if props.use_restricted_range:
+                    col = range_box.column(align=True)
+                    row = col.row(align=True)
+                    row.prop(props, "frame_start")
+                    row.prop(props, "frame_end")
+                    row2 = col.row(align=True)
+                    row2.prop(props, "blend_in")
+                    row2.prop(props, "blend_out")
+
+            # Variation & Spatial Offsets Box
             box_var = layout.box()
             box_var.label(text="Variation & Spatial Offsets", icon='SPHERE')
             col_var = box_var.column(align=True)
@@ -1588,20 +1640,6 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
             elif props.offset_mode == 'RADIAL':
                 col_var.prop(props, "spatial_scale", text="Spatial Scale")
                 col_var.prop(props, "guide_object", text="Guide Object")
-
-            # Seamless Looping Box
-            box_loop = layout.box()
-            header_loop = box_loop.row(align=True)
-            header_loop.prop(props, "enable_loop", icon='TIME', text="Seamless Looping")
-            if props.enable_loop:
-                col_loop = box_loop.column(align=True)
-                row_frames = col_loop.row(align=True)
-                row_frames.prop(props, "loop_start", text="Start")
-                row_frames.prop(props, "loop_end", text="End")
-                row_loop_tools = col_loop.row(align=True)
-                row_loop_tools.prop(props, "loop_repeat", text="Repeat Cycles")
-                op_match = row_loop_tools.operator("noise_wiggler.match_scene_range", text="Match Scene", icon='TIME')
-                op_match.mode = 'BONE'
 
             # Footer
             layout.separator()
@@ -1638,7 +1676,7 @@ def register():
     bpy.types.Object.noise_wiggler_obj_props = bpy.props.PointerProperty(type=ObjectWiggleProperties)
     bpy.types.Object.noise_wiggler_bone_props = bpy.props.PointerProperty(type=BoneWiggleProperties)
 
-    # Legacy alias compatibility for smooth transitions
+    # Legacy alias compatibility
     bpy.types.Object.wiggle_props = bpy.props.PointerProperty(type=ObjectWiggleProperties)
     bpy.types.Object.armature_wiggle_props = bpy.props.PointerProperty(type=BoneWiggleProperties)
 
