@@ -8,9 +8,9 @@ from bpy.app.handlers import persistent
 bl_info = {
     "name": "Noise Wiggler",
     "author": "m-dr",
-    "version": (0, 1, 0),
+    "version": (0, 1, 2),
     "blender": (5, 2, 0),
-    "location": "View3D > Sidebar > Wiggle",
+    "location": "View3D > Sidebar > Noise Wiggler",
     "description": "Unified procedural noise animation for objects and armatures with spatial wave offsets, hierarchy curves, and seamless looping",
     "category": "Animation",
 }
@@ -1393,7 +1393,7 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
     bl_idname = "NOISE_WIGGLER_PT_main_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "Wiggle"
+    bl_category = "Noise Wiggler"
 
     def draw(self, context):
         layout = self.layout
