@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "noise_wiggler"
-version = "0.1.3"
+version = "0.1.4"
 name = "Noise Wiggler"
 tagline = "Unified procedural noise animation for objects and armatures with spatial wave offsets, hierarchy curves, and seamless looping"
 maintainer = "m-dr"

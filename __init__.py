@@ -8,7 +8,7 @@ from bpy.app.handlers import persistent
 bl_info = {
     "name": "Noise Wiggler",
     "author": "m-dr",
-    "version": (0, 1, 3),
+    "version": (0, 1, 4),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Noise Wiggler",
     "description": "Unified procedural noise animation for objects and armatures with spatial wave offsets, hierarchy curves, and seamless looping",
@@ -30,6 +30,109 @@ WIGGLE_CURVE_NODETREE = ".noise_wiggler_curves"
 _is_syncing_props = False
 _is_updating_props = False
 _last_active_object = None
+
+
+# ==============================================================================
+# Add-on Preferences (Default Settings Storage)
+# ==============================================================================
+
+class NoiseWigglerPreferences(bpy.types.AddonPreferences):
+    bl_idname = __package__ if __package__ else "noise_wiggler"
+
+    default_enable_rotation: bpy.props.BoolProperty(name="Rotation", default=True)
+    default_rot_speed: bpy.props.FloatProperty(name="Speed", default=50.0, min=0.01, soft_max=500.0)
+    default_rot_strength: bpy.props.FloatProperty(name="Strength", default=0.2, min=0.0, soft_max=10.0)
+    default_rot_influence: bpy.props.FloatProperty(name="Influence", default=1.0, min=0.0, max=1.0, subtype='FACTOR')
+
+    default_enable_location: bpy.props.BoolProperty(name="Location", default=True)
+    default_loc_speed: bpy.props.FloatProperty(name="Speed", default=50.0, min=0.01, soft_max=500.0)
+    default_loc_strength: bpy.props.FloatProperty(name="Strength", default=0.2, min=0.0, soft_max=10.0)
+    default_loc_influence: bpy.props.FloatProperty(name="Influence", default=1.0, min=0.0, max=1.0, subtype='FACTOR')
+
+    default_use_restricted_range: bpy.props.BoolProperty(name="Restrict Frame Range", default=False)
+    default_frame_start: bpy.props.FloatProperty(name="Start", default=1.0)
+    default_frame_end: bpy.props.FloatProperty(name="End", default=250.0)
+    default_blend_in: bpy.props.FloatProperty(name="Blend In", default=0.0, min=0.0)
+    default_blend_out: bpy.props.FloatProperty(name="Blend Out", default=0.0, min=0.0)
+
+    default_blend_type: bpy.props.EnumProperty(
+        name="Blend Mode",
+        items=[
+            ('ADD', "Add", "Add noise to underlying animation"),
+            ('REPLACE', "Replace", "Replace underlying motion during active range"),
+        ],
+        default='ADD',
+    )
+    default_offset_mode: bpy.props.EnumProperty(
+        name="Offset Mode",
+        items=[
+            ('RANDOM', "Per-Object (Random)", "Individual random phase offset per object"),
+            ('LINEAR', "Directional Wave", "Wave propagating along X, Y, or Z"),
+            ('RADIAL', "Radial Ripple", "Concentric wave radiating from origin or guide"),
+        ],
+        default='RANDOM',
+    )
+    default_offset_axis: bpy.props.EnumProperty(
+        name="Axis",
+        items=[('X', "X", "X Axis"), ('Y', "Y", "Y Axis"), ('Z', "Z", "Z Axis")],
+        default='X',
+    )
+    default_spatial_scale: bpy.props.FloatProperty(name="Spatial Scale", default=10.0, min=0.001)
+    default_use_unique_seed: bpy.props.BoolProperty(name="Per-Object Variation", default=True)
+
+
+class _FallbackPreferences:
+    def __init__(self):
+        self.default_enable_rotation = True
+        self.default_rot_speed = 50.0
+        self.default_rot_strength = 0.2
+        self.default_rot_influence = 1.0
+
+        self.default_enable_location = True
+        self.default_loc_speed = 50.0
+        self.default_loc_strength = 0.2
+        self.default_loc_influence = 1.0
+
+        self.default_use_restricted_range = False
+        self.default_frame_start = 1.0
+        self.default_frame_end = 250.0
+        self.default_blend_in = 0.0
+        self.default_blend_out = 0.0
+
+        self.default_blend_type = 'ADD'
+        self.default_offset_mode = 'RANDOM'
+        self.default_offset_axis = 'X'
+        self.default_spatial_scale = 10.0
+        self.default_use_unique_seed = True
+
+
+_fallback_preferences = _FallbackPreferences()
+
+
+def get_addon_preferences(context=None):
+    if context is None:
+        context = bpy.context
+    candidates = (
+        __package__,
+        __name__,
+        "noise_wiggler",
+        "blender_noise_wiggler",
+        "bl_ext.vscode_development.noise_wiggler",
+        "bl_ext.user_default.noise_wiggler",
+    )
+    if hasattr(context, "preferences") and hasattr(context.preferences, "addons"):
+        for key in candidates:
+            if key and key in context.preferences.addons:
+                addon = context.preferences.addons[key]
+                if hasattr(addon, "preferences") and addon.preferences:
+                    return addon.preferences
+
+        for addon in context.preferences.addons.values():
+            if hasattr(addon, "preferences") and isinstance(addon.preferences, NoiseWigglerPreferences):
+                return addon.preferences
+
+    return _fallback_preferences
+
 
 
 # ==============================================================================
@@ -499,8 +602,13 @@ def apply_object_wiggle(ob, props=None):
                         fc.keyframe_points.add(1)
                         fc.keyframe_points[0].co = (1.0, 0.0)
     else:
-        # Procedural Noise Modifiers
-        if props.enable_rotation:
+        # Procedural Noise Modifiers (Stacked & Sequenced)
+        active_layer = ensure_object_wiggle_layers(ob, props)
+        active_layers = [L for L in props.layers if L.enabled]
+
+        # 1. Rotation Channels
+        any_rot = any(L.enable_rotation for L in active_layers)
+        if any_rot:
             for idx in range(3):
                 fc = ensure_object_fcurve(ob, "delta_rotation_euler", idx)
                 if not fc:
@@ -513,22 +621,39 @@ def apply_object_wiggle(ob, props=None):
                     fc.keyframe_points.add(1)
                     fc.keyframe_points[0].co = (1.0, 0.0)
 
-                mod = find_modifier(fc, WIGGLE_OBJ_ROTATION_MOD) or find_modifier(fc, WIGGLE_OBJ_PREFIX) or find_modifier(fc, "Wiggle Rotation")
-                if mod is None:
-                    mod = fc.modifiers.new(type='NOISE')
-                    mod.name = WIGGLE_OBJ_ROTATION_MOD
+                expected_mod_names = []
+                for l_idx, L in enumerate(active_layers):
+                    if not L.enable_rotation:
+                        continue
+                    mod_name = f"{WIGGLE_OBJ_PREFIX} Rot #{l_idx + 1}"
+                    expected_mod_names.append(mod_name)
 
-                mod.scale = max(props.rot_speed, 0.001)
-                mod.strength = props.rot_strength
-                mod.phase = props.rot_phase + spatial_offset + (idx * 1731.5)
-                mod.use_influence = True
-                mod.influence = props.rot_influence
-                mod.use_restricted_range = props.use_restricted_range
-                if props.use_restricted_range:
-                    mod.frame_start = props.frame_start
-                    mod.frame_end = props.frame_end
-                    mod.blend_in = max(props.blend_in, 0.0)
-                    mod.blend_out = max(props.blend_out, 0.0)
+                    mod = fc.modifiers.get(mod_name)
+                    if mod is None:
+                        if l_idx == 0:
+                            mod = find_modifier(fc, WIGGLE_OBJ_ROTATION_MOD) or find_modifier(fc, WIGGLE_OBJ_PREFIX) or find_modifier(fc, "Wiggle Rotation")
+                        if mod is None:
+                            mod = fc.modifiers.new(type='NOISE')
+                        mod.name = mod_name
+
+                    spatial_offset = calculate_object_spatial_offset(ob, L)
+                    mod.blend_type = L.blend_type
+                    mod.scale = max(L.rot_speed, 0.001)
+                    mod.strength = L.rot_strength
+                    mod.phase = L.rot_phase + spatial_offset + (idx * 1731.5) + (l_idx * 1000.0)
+                    mod.depth = 0
+                    mod.use_influence = True
+                    mod.influence = L.rot_influence
+                    mod.use_restricted_range = L.use_restricted_range
+                    if L.use_restricted_range:
+                        mod.frame_start = L.frame_start
+                        mod.frame_end = L.frame_end
+                        mod.blend_in = max(L.blend_in, 0.0)
+                        mod.blend_out = max(L.blend_out, 0.0)
+
+                for m in list(fc.modifiers):
+                    if (m.name.startswith(WIGGLE_OBJ_PREFIX) or m.name.startswith("Wiggle")) and m.name not in expected_mod_names and m.type == 'NOISE':
+                        fc.modifiers.remove(m)
         else:
             fcurves = get_object_fcurves(ob)
             for fc in fcurves:
@@ -537,7 +662,9 @@ def apply_object_wiggle(ob, props=None):
                         if m.name.startswith(WIGGLE_OBJ_PREFIX) or m.name.startswith("Wiggle"):
                             fc.modifiers.remove(m)
 
-        if props.enable_location:
+        # 2. Location Channels
+        any_loc = any(L.enable_location for L in active_layers)
+        if any_loc:
             for idx in range(3):
                 fc = ensure_object_fcurve(ob, "delta_location", idx)
                 if not fc:
@@ -550,22 +677,39 @@ def apply_object_wiggle(ob, props=None):
                     fc.keyframe_points.add(1)
                     fc.keyframe_points[0].co = (1.0, 0.0)
 
-                mod = find_modifier(fc, WIGGLE_OBJ_LOCATION_MOD) or find_modifier(fc, WIGGLE_OBJ_PREFIX) or find_modifier(fc, "Wiggle Location")
-                if mod is None:
-                    mod = fc.modifiers.new(type='NOISE')
-                    mod.name = WIGGLE_OBJ_LOCATION_MOD
+                expected_mod_names = []
+                for l_idx, L in enumerate(active_layers):
+                    if not L.enable_location:
+                        continue
+                    mod_name = f"{WIGGLE_OBJ_PREFIX} Loc #{l_idx + 1}"
+                    expected_mod_names.append(mod_name)
 
-                mod.scale = max(props.loc_speed, 0.001)
-                mod.strength = props.loc_strength
-                mod.phase = props.loc_phase + spatial_offset + 50000.0 + (idx * 1731.5)
-                mod.use_influence = True
-                mod.influence = props.loc_influence
-                mod.use_restricted_range = props.use_restricted_range
-                if props.use_restricted_range:
-                    mod.frame_start = props.frame_start
-                    mod.frame_end = props.frame_end
-                    mod.blend_in = max(props.blend_in, 0.0)
-                    mod.blend_out = max(props.blend_out, 0.0)
+                    mod = fc.modifiers.get(mod_name)
+                    if mod is None:
+                        if l_idx == 0:
+                            mod = find_modifier(fc, WIGGLE_OBJ_LOCATION_MOD) or find_modifier(fc, WIGGLE_OBJ_PREFIX) or find_modifier(fc, "Wiggle Location")
+                        if mod is None:
+                            mod = fc.modifiers.new(type='NOISE')
+                        mod.name = mod_name
+
+                    spatial_offset = calculate_object_spatial_offset(ob, L)
+                    mod.blend_type = L.blend_type
+                    mod.scale = max(L.loc_speed, 0.001)
+                    mod.strength = L.loc_strength
+                    mod.phase = L.loc_phase + spatial_offset + 50000.0 + (idx * 1731.5) + (l_idx * 1000.0)
+                    mod.depth = 0
+                    mod.use_influence = True
+                    mod.influence = L.loc_influence
+                    mod.use_restricted_range = L.use_restricted_range
+                    if L.use_restricted_range:
+                        mod.frame_start = L.frame_start
+                        mod.frame_end = L.frame_end
+                        mod.blend_in = max(L.blend_in, 0.0)
+                        mod.blend_out = max(L.blend_out, 0.0)
+
+                for m in list(fc.modifiers):
+                    if (m.name.startswith(WIGGLE_OBJ_PREFIX) or m.name.startswith("Wiggle")) and m.name not in expected_mod_names and m.type == 'NOISE':
+                        fc.modifiers.remove(m)
         else:
             fcurves = get_object_fcurves(ob)
             for fc in fcurves:
@@ -993,11 +1137,276 @@ def on_depsgraph_update_post(scene, depsgraph):
             sync_props_from_modifiers(active_ob)
 
 
+def copy_layer_properties(source, target):
+    target.enabled = source.enabled
+    target.blend_type = source.blend_type
+    target.enable_rotation = source.enable_rotation
+    target.rot_speed = source.rot_speed
+    target.rot_strength = source.rot_strength
+    target.rot_phase = source.rot_phase
+    target.rot_influence = source.rot_influence
+
+    target.enable_location = source.enable_location
+    target.loc_speed = source.loc_speed
+    target.loc_strength = source.loc_strength
+    target.loc_phase = source.loc_phase
+    target.loc_influence = source.loc_influence
+
+    target.use_restricted_range = source.use_restricted_range
+    target.frame_start = source.frame_start
+    target.frame_end = source.frame_end
+    target.blend_in = source.blend_in
+    target.blend_out = source.blend_out
+
+    target.offset_mode = source.offset_mode
+    target.offset_axis = source.offset_axis
+    target.spatial_scale = source.spatial_scale
+    target.guide_object = source.guide_object
+    target.seed = source.seed
+    target.use_unique_seed = source.use_unique_seed
+
+
+def on_object_layer_prop_update(self, context):
+    global _is_syncing_props, _is_updating_props
+    if _is_syncing_props or _is_updating_props:
+        return
+
+    _is_updating_props = True
+    try:
+        source_ob = getattr(self, "id_data", None)
+        if source_ob and isinstance(source_ob, bpy.types.Object):
+            if has_object_wiggle(source_ob):
+                apply_object_wiggle(source_ob)
+
+        if context:
+            active_ob = context.active_object
+            sel_obs = context.selected_objects
+            if source_ob == active_ob and sel_obs and len(sel_obs) > 1:
+                active_props = active_ob.noise_wiggler_obj_props
+                active_idx = active_props.active_layer_index
+                for ob in sel_obs:
+                    if ob != active_ob and has_object_wiggle(ob):
+                        op = ob.noise_wiggler_obj_props
+                        ensure_object_wiggle_layers(ob, op)
+                        if active_idx < len(op.layers):
+                            copy_layer_properties(self, op.layers[active_idx])
+                            apply_object_wiggle(ob, op)
+    finally:
+        _is_updating_props = False
+
+
+def ensure_object_wiggle_layers(ob, props=None):
+    if not ob:
+        return None
+    if props is None:
+        props = getattr(ob, "noise_wiggler_obj_props", None)
+        if not props:
+            return None
+
+    if len(props.layers) == 0:
+        layer = props.layers.add()
+        layer.name = "Layer 1"
+        prefs = get_addon_preferences()
+        if prefs:
+            layer.enable_rotation = prefs.default_enable_rotation
+            layer.rot_speed = prefs.default_rot_speed
+            layer.rot_strength = prefs.default_rot_strength
+            layer.rot_influence = prefs.default_rot_influence
+
+            layer.enable_location = prefs.default_enable_location
+            layer.loc_speed = prefs.default_loc_speed
+            layer.loc_strength = prefs.default_loc_strength
+            layer.loc_influence = prefs.default_loc_influence
+
+            layer.use_restricted_range = prefs.default_use_restricted_range
+            layer.frame_start = prefs.default_frame_start
+            layer.frame_end = prefs.default_frame_end
+            layer.blend_in = prefs.default_blend_in
+            layer.blend_out = prefs.default_blend_out
+
+            layer.blend_type = prefs.default_blend_type
+            layer.offset_mode = prefs.default_offset_mode
+            layer.offset_axis = prefs.default_offset_axis
+            layer.spatial_scale = prefs.default_spatial_scale
+            layer.use_unique_seed = prefs.default_use_unique_seed
+        else:
+            layer.enable_rotation = props.enable_rotation
+            layer.rot_speed = props.rot_speed
+            layer.rot_strength = props.rot_strength
+            layer.rot_influence = props.rot_influence
+            layer.rot_phase = props.rot_phase
+
+            layer.enable_location = props.enable_location
+            layer.loc_speed = props.loc_speed
+            layer.loc_strength = props.loc_strength
+            layer.loc_influence = props.loc_influence
+            layer.loc_phase = props.loc_phase
+
+            layer.use_restricted_range = props.use_restricted_range
+            layer.frame_start = props.frame_start
+            layer.frame_end = props.frame_end
+            layer.blend_in = props.blend_in
+            layer.blend_out = props.blend_out
+
+            layer.offset_mode = props.offset_mode
+            layer.offset_axis = props.offset_axis
+            layer.spatial_scale = props.spatial_scale
+            layer.guide_object = props.guide_object
+            layer.seed = props.seed
+            layer.use_unique_seed = props.use_unique_seed
+
+        props.active_layer_index = 0
+
+    if props.active_layer_index >= len(props.layers):
+        props.active_layer_index = max(0, len(props.layers) - 1)
+
+    return props.layers[props.active_layer_index]
+
+
+class ObjectWiggleLayerProperty(bpy.types.PropertyGroup):
+    name: bpy.props.StringProperty(
+        name="Layer Name",
+        default="Noise Layer",
+        update=on_object_layer_prop_update,
+    )
+    enabled: bpy.props.BoolProperty(
+        name="Enabled",
+        description="Mute or unmute this noise layer",
+        default=True,
+        update=on_object_layer_prop_update,
+    )
+    blend_type: bpy.props.EnumProperty(
+        name="Blend Mode",
+        description="How this noise layer combines with underlying layers/keyframes",
+        items=[
+            ('ADD', "Add", "Add noise to underlying animation"),
+            ('REPLACE', "Replace", "Replace underlying motion during active range"),
+        ],
+        default='ADD',
+        update=on_object_layer_prop_update,
+    )
+
+    # Rotation
+    enable_rotation: bpy.props.BoolProperty(
+        name="Rotation",
+        description="Enable procedural rotation noise on delta transform",
+        default=True,
+        update=on_object_layer_prop_update,
+    )
+    rot_speed: bpy.props.FloatProperty(
+        name="Speed",
+        description="Noise speed/scale for rotation (higher = slower, smoother)",
+        default=50.0,
+        min=0.01,
+        soft_max=500.0,
+        update=on_object_layer_prop_update,
+    )
+    rot_strength: bpy.props.FloatProperty(
+        name="Strength",
+        description="Noise amplitude for rotation",
+        default=0.2,
+        min=0.0,
+        soft_max=10.0,
+        update=on_object_layer_prop_update,
+    )
+    rot_phase: bpy.props.FloatProperty(
+        name="Phase Offset",
+        description="Phase offset for rotation noise",
+        default=0.0,
+        update=on_object_layer_prop_update,
+    )
+    rot_influence: bpy.props.FloatProperty(
+        name="Influence",
+        description="Influence blend factor",
+        subtype="FACTOR",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        update=on_object_layer_prop_update,
+    )
+
+    # Location
+    enable_location: bpy.props.BoolProperty(
+        name="Location",
+        description="Enable procedural location noise on delta transform",
+        default=True,
+        update=on_object_layer_prop_update,
+    )
+    loc_speed: bpy.props.FloatProperty(
+        name="Speed",
+        description="Noise speed/scale for location",
+        default=50.0,
+        min=0.01,
+        soft_max=500.0,
+        update=on_object_layer_prop_update,
+    )
+    loc_strength: bpy.props.FloatProperty(
+        name="Strength",
+        description="Noise amplitude for location",
+        default=0.2,
+        min=0.0,
+        soft_max=10.0,
+        update=on_object_layer_prop_update,
+    )
+    loc_phase: bpy.props.FloatProperty(
+        name="Phase Offset",
+        description="Phase offset for location noise",
+        default=0.0,
+        update=on_object_layer_prop_update,
+    )
+    loc_influence: bpy.props.FloatProperty(
+        name="Influence",
+        description="Influence blend factor for location",
+        subtype="FACTOR",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        update=on_object_layer_prop_update,
+    )
+
+    # Restrict Range
+    use_restricted_range: bpy.props.BoolProperty(
+        name="Restrict Frame Range",
+        description="Limit procedural noise to a specific frame range",
+        default=False,
+        update=on_object_layer_prop_update,
+    )
+    frame_start: bpy.props.FloatProperty(name="Start", default=1.0, update=on_object_layer_prop_update)
+    frame_end: bpy.props.FloatProperty(name="End", default=250.0, update=on_object_layer_prop_update)
+    blend_in: bpy.props.FloatProperty(name="Blend In", default=0.0, min=0.0, update=on_object_layer_prop_update)
+    blend_out: bpy.props.FloatProperty(name="Blend Out", default=0.0, min=0.0, update=on_object_layer_prop_update)
+
+    # Spatial Offsets
+    offset_mode: bpy.props.EnumProperty(
+        name="Offset Mode",
+        items=[
+            ('RANDOM', "Per-Object (Random)", "Individual random phase offset per object"),
+            ('LINEAR', "Directional Wave", "Wave propagating along X, Y, or Z"),
+            ('RADIAL', "Radial Ripple", "Concentric wave radiating from origin or guide"),
+        ],
+        default='RANDOM',
+        update=on_object_layer_prop_update,
+    )
+    offset_axis: bpy.props.EnumProperty(
+        name="Axis",
+        items=[('X', "X", "X Axis"), ('Y', "Y", "Y Axis"), ('Z', "Z", "Z Axis")],
+        default='X',
+        update=on_object_layer_prop_update,
+    )
+    guide_object: bpy.props.PointerProperty(type=bpy.types.Object, name="Guide Object", update=on_object_layer_prop_update)
+    spatial_scale: bpy.props.FloatProperty(name="Spatial Scale", default=10.0, min=0.001, update=on_object_layer_prop_update)
+    seed: bpy.props.IntProperty(name="Seed", default=0, update=on_object_layer_prop_update)
+    use_unique_seed: bpy.props.BoolProperty(name="Per-Object Variation", default=True, update=on_object_layer_prop_update)
+
+
 # ==============================================================================
 # Property Groups
 # ==============================================================================
 
 class ObjectWiggleProperties(bpy.types.PropertyGroup):
+    layers: bpy.props.CollectionProperty(type=ObjectWiggleLayerProperty)
+    active_layer_index: bpy.props.IntProperty(name="Active Layer", default=0, min=0)
+
     # Rotation
     enable_rotation: bpy.props.BoolProperty(
         name="Rotation",
@@ -1199,6 +1608,246 @@ class BoneWiggleProperties(bpy.types.PropertyGroup):
 
 
 # ==============================================================================
+# ==============================================================================
+# UIList & Stack Operators (Object Mode Multi-Layer Noise)
+# ==============================================================================
+
+class NOISE_WIGGLER_UL_layer_list(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            row = layout.row(align=True)
+            # Mute/Unmute checkbox
+            row.prop(item, "enabled", text="", icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT', emboss=False)
+            # Layer name
+            row.prop(item, "name", text="", emboss=False)
+
+            # Sub-info badge (range / blend mode)
+            badge_row = row.row(align=True)
+            badge_row.alignment = 'RIGHT'
+            if item.use_restricted_range:
+                badge_row.label(text=f"[{int(item.frame_start)}..{int(item.frame_end)}]", icon='PREVIEW_RANGE')
+            else:
+                badge_row.label(text="All", icon='TIME')
+
+            if item.blend_type == 'ADD':
+                badge_row.label(text="+")
+            else:
+                badge_row.label(text="R")
+        elif self.layout_type == 'GRID':
+            layout.alignment = 'CENTER'
+            layout.label(text=item.name)
+
+
+class NOISE_WIGGLER_OT_add_layer(bpy.types.Operator):
+    bl_idname = "noise_wiggler.add_layer"
+    bl_label = "Add Noise Layer"
+    bl_description = "Add a new noise modifier layer to the stack"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        active_ob = context.active_object
+        sel_obs = [o for o in context.selected_objects if o is not None] or ([active_ob] if active_ob else [])
+        if not sel_obs:
+            return {'CANCELLED'}
+
+        prefs = get_addon_preferences(context)
+        for ob in sel_obs:
+            props = ob.noise_wiggler_obj_props
+            layer = props.layers.add()
+            layer_num = len(props.layers)
+            layer.name = f"Layer {layer_num}"
+
+            if prefs:
+                layer.enable_rotation = prefs.default_enable_rotation
+                layer.rot_speed = prefs.default_rot_speed
+                layer.rot_strength = prefs.default_rot_strength
+                layer.rot_influence = prefs.default_rot_influence
+
+                layer.enable_location = prefs.default_enable_location
+                layer.loc_speed = prefs.default_loc_speed
+                layer.loc_strength = prefs.default_loc_strength
+                layer.loc_influence = prefs.default_loc_influence
+
+                layer.use_restricted_range = prefs.default_use_restricted_range
+                layer.frame_start = prefs.default_frame_start
+                layer.frame_end = prefs.default_frame_end
+                layer.blend_in = prefs.default_blend_in
+                layer.blend_out = prefs.default_blend_out
+
+                layer.blend_type = prefs.default_blend_type
+                layer.offset_mode = prefs.default_offset_mode
+                layer.offset_axis = prefs.default_offset_axis
+                layer.spatial_scale = prefs.default_spatial_scale
+                layer.use_unique_seed = prefs.default_use_unique_seed
+            else:
+                layer.enable_rotation = True
+                layer.rot_speed = 50.0
+                layer.rot_strength = 0.2
+                layer.enable_location = True
+                layer.loc_speed = 50.0
+                layer.loc_strength = 0.2
+                layer.blend_type = 'ADD'
+
+            props.active_layer_index = len(props.layers) - 1
+            if has_object_wiggle(ob):
+                apply_object_wiggle(ob, props)
+
+        return {'FINISHED'}
+
+
+class NOISE_WIGGLER_OT_remove_layer(bpy.types.Operator):
+    bl_idname = "noise_wiggler.remove_layer"
+    bl_label = "Remove Noise Layer"
+    bl_description = "Remove the active noise layer from the stack"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return ob and len(ob.noise_wiggler_obj_props.layers) > 1
+
+    def execute(self, context):
+        active_ob = context.active_object
+        sel_obs = [o for o in context.selected_objects if o is not None] or ([active_ob] if active_ob else [])
+        if not sel_obs:
+            return {'CANCELLED'}
+
+        active_idx = active_ob.noise_wiggler_obj_props.active_layer_index if active_ob else 0
+
+        for ob in sel_obs:
+            props = ob.noise_wiggler_obj_props
+            if len(props.layers) > 1:
+                idx = min(active_idx, len(props.layers) - 1)
+                props.layers.remove(idx)
+                props.active_layer_index = max(0, min(idx, len(props.layers) - 1))
+                if has_object_wiggle(ob):
+                    apply_object_wiggle(ob, props)
+
+        return {'FINISHED'}
+
+
+class NOISE_WIGGLER_OT_duplicate_layer(bpy.types.Operator):
+    bl_idname = "noise_wiggler.duplicate_layer"
+    bl_label = "Duplicate Noise Layer"
+    bl_description = "Duplicate the active noise layer"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return ob and len(ob.noise_wiggler_obj_props.layers) > 0
+
+    def execute(self, context):
+        active_ob = context.active_object
+        sel_obs = [o for o in context.selected_objects if o is not None] or ([active_ob] if active_ob else [])
+        if not sel_obs:
+            return {'CANCELLED'}
+
+        active_idx = active_ob.noise_wiggler_obj_props.active_layer_index if active_ob else 0
+
+        for ob in sel_obs:
+            props = ob.noise_wiggler_obj_props
+            if props.layers:
+                idx = min(active_idx, len(props.layers) - 1)
+                src = props.layers[idx]
+                new_layer = props.layers.add()
+                copy_layer_properties(src, new_layer)
+                new_layer.name = f"{src.name} Copy"
+                props.active_layer_index = len(props.layers) - 1
+                if has_object_wiggle(ob):
+                    apply_object_wiggle(ob, props)
+
+        return {'FINISHED'}
+
+
+class NOISE_WIGGLER_OT_move_layer(bpy.types.Operator):
+    bl_idname = "noise_wiggler.move_layer"
+    bl_label = "Move Layer"
+    bl_description = "Move layer up or down in the stack"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    direction: bpy.props.EnumProperty(
+        items=[('UP', "Up", "Move layer up"), ('DOWN', "Down", "Move layer down")],
+        default='UP',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return ob and len(ob.noise_wiggler_obj_props.layers) > 1
+
+    def execute(self, context):
+        active_ob = context.active_object
+        sel_obs = [o for o in context.selected_objects if o is not None] or ([active_ob] if active_ob else [])
+        if not sel_obs:
+            return {'CANCELLED'}
+
+        active_idx = active_ob.noise_wiggler_obj_props.active_layer_index if active_ob else 0
+
+        for ob in sel_obs:
+            props = ob.noise_wiggler_obj_props
+            if len(props.layers) > 1:
+                cur_idx = min(active_idx, len(props.layers) - 1)
+                new_idx = cur_idx - 1 if self.direction == 'UP' else cur_idx + 1
+                if 0 <= new_idx < len(props.layers):
+                    props.layers.move(cur_idx, new_idx)
+                    props.active_layer_index = new_idx
+                    if has_object_wiggle(ob):
+                        apply_object_wiggle(ob, props)
+
+        return {'FINISHED'}
+
+
+class NOISE_WIGGLER_OT_set_default(bpy.types.Operator):
+    bl_idname = "noise_wiggler.set_default"
+    bl_label = "Set as Default"
+    bl_description = "Store current active noise settings as the default for new layers"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        prefs = get_addon_preferences(context)
+        if not prefs:
+            self.report({'WARNING'}, "Add-on preferences not found.")
+            return {'CANCELLED'}
+
+        active_ob = context.active_object
+        if not active_ob:
+            self.report({'WARNING'}, "No active object.")
+            return {'CANCELLED'}
+
+        props = active_ob.noise_wiggler_obj_props
+        layer = ensure_object_wiggle_layers(active_ob, props)
+        if not layer:
+            self.report({'WARNING'}, "No active layer.")
+            return {'CANCELLED'}
+
+        prefs.default_enable_rotation = layer.enable_rotation
+        prefs.default_rot_speed = layer.rot_speed
+        prefs.default_rot_strength = layer.rot_strength
+        prefs.default_rot_influence = layer.rot_influence
+
+        prefs.default_enable_location = layer.enable_location
+        prefs.default_loc_speed = layer.loc_speed
+        prefs.default_loc_strength = layer.loc_strength
+        prefs.default_loc_influence = layer.loc_influence
+
+        prefs.default_use_restricted_range = layer.use_restricted_range
+        prefs.default_frame_start = layer.frame_start
+        prefs.default_frame_end = layer.frame_end
+        prefs.default_blend_in = layer.blend_in
+        prefs.default_blend_out = layer.blend_out
+
+        prefs.default_blend_type = layer.blend_type
+        prefs.default_offset_mode = layer.offset_mode
+        prefs.default_offset_axis = layer.offset_axis
+        prefs.default_spatial_scale = layer.spatial_scale
+        prefs.default_use_unique_seed = layer.use_unique_seed
+
+        self.report({'INFO'}, "Saved current layer settings as defaults.")
+        return {'FINISHED'}
+
+
+# ==============================================================================
 # Operators
 # ==============================================================================
 
@@ -1229,6 +1878,12 @@ class NOISE_WIGGLER_OT_apply(bpy.types.Operator):
                 if active_ob and ob != active_ob:
                     ap = active_ob.noise_wiggler_obj_props
                     op = ob.noise_wiggler_obj_props
+                    ensure_object_wiggle_layers(active_ob, ap)
+                    op.layers.clear()
+                    for src_layer in ap.layers:
+                        dst_layer = op.layers.add()
+                        copy_layer_properties(src_layer, dst_layer)
+                    op.active_layer_index = ap.active_layer_index
                     op.rot_speed, op.rot_strength, op.rot_phase, op.rot_influence, op.enable_rotation = ap.rot_speed, ap.rot_strength, ap.rot_phase, ap.rot_influence, ap.enable_rotation
                     op.loc_speed, op.loc_strength, op.loc_phase, op.loc_influence, op.enable_location = ap.loc_speed, ap.loc_strength, ap.loc_phase, ap.loc_influence, ap.enable_location
                     op.offset_mode, op.offset_axis, op.spatial_scale, op.guide_object, op.seed, op.use_unique_seed = ap.offset_mode, ap.offset_axis, ap.spatial_scale, ap.guide_object, ap.seed, ap.use_unique_seed
@@ -1303,10 +1958,15 @@ class NOISE_WIGGLER_OT_match_scene_range(bpy.types.Operator):
         sel_obs = [o for o in context.selected_objects if o is not None] or [context.active_object]
         if self.mode == 'OBJECT':
             for ob in sel_obs:
-                ob.noise_wiggler_obj_props.loop_start = scene.frame_start
-                ob.noise_wiggler_obj_props.loop_end = scene.frame_end
-                if ob.noise_wiggler_obj_props.enable_loop and has_object_wiggle(ob):
-                    apply_object_wiggle(ob, ob.noise_wiggler_obj_props)
+                props = ob.noise_wiggler_obj_props
+                props.loop_start = scene.frame_start
+                props.loop_end = scene.frame_end
+                active_l = ensure_object_wiggle_layers(ob, props)
+                if active_l:
+                    active_l.frame_start = float(scene.frame_start)
+                    active_l.frame_end = float(scene.frame_end)
+                if has_object_wiggle(ob):
+                    apply_object_wiggle(ob, props)
         else:
             for arm in [o for o in sel_obs if o.type == 'ARMATURE']:
                 arm.noise_wiggler_bone_props.loop_start = scene.frame_start
@@ -1329,9 +1989,13 @@ class NOISE_WIGGLER_OT_reroll_seed(bpy.types.Operator):
         sel_obs = [o for o in context.selected_objects if o is not None] or [context.active_object]
         if self.mode == 'OBJECT':
             for ob in sel_obs:
-                ob.noise_wiggler_obj_props.seed = new_seed
+                props = ob.noise_wiggler_obj_props
+                props.seed = new_seed
+                active_l = ensure_object_wiggle_layers(ob, props)
+                if active_l:
+                    active_l.seed = new_seed
                 if has_object_wiggle(ob):
-                    apply_object_wiggle(ob, ob.noise_wiggler_obj_props)
+                    apply_object_wiggle(ob, props)
         else:
             for arm in [o for o in sel_obs if o.type == 'ARMATURE']:
                 arm.noise_wiggler_bone_props.seed = new_seed
@@ -1446,6 +2110,7 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
         if active_mode == 'OBJECT':
             props = target_ob.noise_wiggler_obj_props
             is_active = has_object_wiggle(target_ob)
+            active_layer = ensure_object_wiggle_layers(target_ob, props)
 
             # Top Action Buttons
             main_col = layout.column(align=True)
@@ -1463,27 +2128,50 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
             status_row = layout.row(align=True)
             status_row.label(text="Status: Wiggle Active" if is_active else "Status: No Wiggle", icon='CHECKMARK' if is_active else 'DOT')
 
+            # Noise Layer Stack Box
+            stack_box = layout.box()
+            stack_box.label(text="Noise Layers (Stack & Sequence)", icon='RENDERLAYERS')
+
+            row_stack = stack_box.row()
+            row_stack.template_list("NOISE_WIGGLER_UL_layer_list", "", props, "layers", props, "active_layer_index", rows=3)
+
+            col_btns = row_stack.column(align=True)
+            col_btns.operator("noise_wiggler.add_layer", icon='ADD', text="")
+            col_btns.operator("noise_wiggler.remove_layer", icon='REMOVE', text="")
+            col_btns.separator()
+            col_btns.operator("noise_wiggler.duplicate_layer", icon='DUPLICATE', text="")
+            col_btns.separator()
+            op_up = col_btns.operator("noise_wiggler.move_layer", icon='TRIA_UP', text="")
+            op_up.direction = 'UP'
+            op_dn = col_btns.operator("noise_wiggler.move_layer", icon='TRIA_DOWN', text="")
+            op_dn.direction = 'DOWN'
+
+            stack_footer = stack_box.row(align=True)
+            stack_footer.operator("noise_wiggler.set_default", text="Set as Default", icon='SETTINGS')
+
+            cur = active_layer if active_layer else props
+
             # Rotation Box
             rot_box = layout.box()
             rot_header = rot_box.row(align=True)
-            rot_header.prop(props, "enable_rotation", text="Rotation Wiggle", icon='ORIENTATION_GIMBAL')
-            if props.enable_rotation:
+            rot_header.prop(cur, "enable_rotation", text="Rotation Wiggle", icon='ORIENTATION_GIMBAL')
+            if cur.enable_rotation:
                 col = rot_box.column(align=True)
-                col.prop(props, "rot_speed")
-                col.prop(props, "rot_strength")
-                col.prop(props, "rot_phase")
-                col.prop(props, "rot_influence")
+                col.prop(cur, "rot_speed")
+                col.prop(cur, "rot_strength")
+                col.prop(cur, "rot_phase")
+                col.prop(cur, "rot_influence")
 
             # Location Box
             loc_box = layout.box()
             loc_header = loc_box.row(align=True)
-            loc_header.prop(props, "enable_location", text="Location Wiggle", icon='ORIENTATION_GLOBAL')
-            if props.enable_location:
+            loc_header.prop(cur, "enable_location", text="Location Wiggle", icon='ORIENTATION_GLOBAL')
+            if cur.enable_location:
                 col = loc_box.column(align=True)
-                col.prop(props, "loc_speed")
-                col.prop(props, "loc_strength")
-                col.prop(props, "loc_phase")
-                col.prop(props, "loc_influence")
+                col.prop(cur, "loc_speed")
+                col.prop(cur, "loc_strength")
+                col.prop(cur, "loc_phase")
+                col.prop(cur, "loc_influence")
 
             # Seamless Looping Box
             loop_box = layout.box()
@@ -1503,33 +2191,35 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
             if not props.enable_loop:
                 range_box = layout.box()
                 range_header = range_box.row(align=True)
-                range_header.prop(props, "use_restricted_range", text="Restrict Frame Range", icon='PREVIEW_RANGE')
-                if props.use_restricted_range:
+                range_header.prop(cur, "use_restricted_range", text="Restrict Frame Range", icon='PREVIEW_RANGE')
+                if cur.use_restricted_range:
                     col = range_box.column(align=True)
                     row = col.row(align=True)
-                    row.prop(props, "frame_start")
-                    row.prop(props, "frame_end")
+                    row.prop(cur, "frame_start")
+                    row.prop(cur, "frame_end")
                     row2 = col.row(align=True)
-                    row2.prop(props, "blend_in")
-                    row2.prop(props, "blend_out")
+                    row2.prop(cur, "blend_in")
+                    row2.prop(cur, "blend_out")
+                    row3 = col.row(align=True)
+                    row3.prop(cur, "blend_type", text="Blend Mode")
 
             # Variation & Spatial Offsets Box
             var_box = layout.box()
             var_box.label(text="Variation & Spatial Offsets", icon='SPHERE')
             col = var_box.column(align=True)
-            col.prop(props, "offset_mode", text="Mode")
-            if props.offset_mode == 'RANDOM':
-                col.prop(props, "use_unique_seed")
-            elif props.offset_mode == 'LINEAR':
-                col.prop(props, "offset_axis", text="Axis")
-                col.prop(props, "spatial_scale", text="Spatial Scale")
-                col.prop(props, "guide_object", text="Guide Object")
-            elif props.offset_mode == 'RADIAL':
-                col.prop(props, "spatial_scale", text="Spatial Scale")
-                col.prop(props, "guide_object", text="Guide Object")
+            col.prop(cur, "offset_mode", text="Mode")
+            if cur.offset_mode == 'RANDOM':
+                col.prop(cur, "use_unique_seed")
+            elif cur.offset_mode == 'LINEAR':
+                col.prop(cur, "offset_axis", text="Axis")
+                col.prop(cur, "spatial_scale", text="Spatial Scale")
+                col.prop(cur, "guide_object", text="Guide Object")
+            elif cur.offset_mode == 'RADIAL':
+                col.prop(cur, "spatial_scale", text="Spatial Scale")
+                col.prop(cur, "guide_object", text="Guide Object")
 
             row_seed = col.row(align=True)
-            row_seed.prop(props, "seed", text="Seed")
+            row_seed.prop(cur, "seed", text="Seed")
             op_seed = row_seed.operator("noise_wiggler.reroll_seed", text="", icon='FILE_REFRESH')
             op_seed.mode = 'OBJECT'
 
@@ -1601,7 +2291,7 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
                         box_falloff.template_curve_mapping(node, "mapping", type='NONE')
 
             # Seamless Looping Box
-            loop_box = layout.box()
+            box_loop = layout.box()
             header_loop = box_loop.row(align=True)
             header_loop.prop(props, "enable_loop", text="Seamless Looping (No NLA)", icon='FILE_REFRESH')
             if props.enable_loop:
@@ -1653,8 +2343,16 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
 # ==============================================================================
 
 classes = [
+    NoiseWigglerPreferences,
+    ObjectWiggleLayerProperty,
     ObjectWiggleProperties,
     BoneWiggleProperties,
+    NOISE_WIGGLER_UL_layer_list,
+    NOISE_WIGGLER_OT_add_layer,
+    NOISE_WIGGLER_OT_remove_layer,
+    NOISE_WIGGLER_OT_duplicate_layer,
+    NOISE_WIGGLER_OT_move_layer,
+    NOISE_WIGGLER_OT_set_default,
     NOISE_WIGGLER_OT_apply,
     NOISE_WIGGLER_OT_clear,
     NOISE_WIGGLER_OT_match_scene_range,
