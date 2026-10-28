@@ -6,7 +6,7 @@ from mathutils import Vector, noise
 from bpy.app.handlers import persistent
 
 bl_info = {
-    "name": "Noise Wiggler",
+    "name": "Noise Wiggler (DEV)",
     "author": "m-dr",
     "version": (0, 1, 3),
     "blender": (5, 2, 0),
