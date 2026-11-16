@@ -8,7 +8,7 @@ from bpy.app.handlers import persistent
 bl_info = {
     "name": "Noise Wiggler (DEV)",
     "author": "m-dr",
-    "version": (0, 1, 3),
+    "version": (0, 1, 4),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Noise Wiggler",
     "description": "Unified procedural noise animation for objects and armatures with spatial wave offsets, hierarchy curves, and seamless looping",
@@ -1602,10 +1602,10 @@ class NOISE_WIGGLER_PT_main_panel(bpy.types.Panel):
 
             # Seamless Looping Box
             loop_box = layout.box()
-            header_loop = box_loop.row(align=True)
+            header_loop = loop_box.row(align=True)
             header_loop.prop(props, "enable_loop", text="Seamless Looping (No NLA)", icon='FILE_REFRESH')
             if props.enable_loop:
-                col_loop = box_loop.column(align=True)
+                col_loop = loop_box.column(align=True)
                 row_frames = col_loop.row(align=True)
                 row_frames.prop(props, "loop_start")
                 row_frames.prop(props, "loop_end")
